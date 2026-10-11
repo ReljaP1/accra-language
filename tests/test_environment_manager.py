@@ -24,7 +24,10 @@ class FakeManifest(Manifest):
 
     @override
     def extract_dependencies(self) -> set[Dependency] | None:
-        return {Dependency(name="foo", version="4.5")}
+        return {
+            Dependency(name="foo", version="4.5"),
+            Dependency(name="bar", version="9.4"),
+        }
 
     @override
     def get_supported_language_versions(self) -> set[str] | AccraError:
@@ -83,6 +86,7 @@ def test_environment_manager():
         dockerfile=[
             'RUN echo "Fake language, version 9.0, installed!"',
             'RUN echo "Fake environment manager setup complete!"',
+            'RUN echo "Dependency bar-9.4 installed!"',
             'RUN echo "Dependency foo-4.5 installed!"',
             'RUN echo "Build complete!"',
         ],
