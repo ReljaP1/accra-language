@@ -9,6 +9,8 @@ from accra_language import (
     DockerfileInstruction,
     EnvironmentManager,
     EnvironmentManagerSpec,
+    Language,
+    LanguageSpec,
     Manifest,
     ManifestSpec,
 )
@@ -90,7 +92,6 @@ class FakeEnvironmentManager(EnvironmentManager):
 
 
 def test_environment_manager():
-    result = AccraResult()
     correct = AccraResult(
         dockerfile=Dockerfile(
             pre_dependencies_installation=[
@@ -110,14 +111,11 @@ def test_environment_manager():
     config = Config()
 
     env_mgr = FakeEnvironmentManager(config)
+    language = Language(
+        LanguageSpec(
+            name="", version="", config=config, supported_env_managers={env_mgr}
+        )
+    )
 
-    result.extend(env_mgr.pre_dependencies_installation())
-    assert result.success
-
-    result.extend(env_mgr.dependencies_installation())
-    assert result.success
-
-    result.extend(env_mgr.post_dependencies_installation())
-    assert result.success
-
-    assert result == correct
+    assert language.detect()
+    assert language.build() == correct

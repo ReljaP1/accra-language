@@ -46,13 +46,13 @@ class Language(ABC):
         if not self.env_manager:
             return result
 
-        result.extend(self.env_manager.setup())
+        result.extend(self.env_manager.pre_dependencies_installation())
         if not result.success:
             return result
 
-        result.extend(self.env_manager.install_dependencies())
+        result.extend(self.env_manager.dependencies_installation())
         if not result.success:
             return result
 
-        result.extend(self.env_manager.build())
+        result.extend(self.env_manager.post_dependencies_installation())
         return result
