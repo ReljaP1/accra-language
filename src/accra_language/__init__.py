@@ -1,6 +1,6 @@
 from .config import Config
 from .dependency import Dependency
-from .dockerfile import DockerfileInstruction, generate_dockerfile
+from .dockerfile import Dockerfile, DockerfileInstruction
 from .environment_manager import (
     AccraFailedDependencyInstallError,
     EnvironmentManager,
@@ -27,6 +27,7 @@ __all__ = [
     "AccraRunError",
     "Config",
     "Dependency",
+    "Dockerfile",
     "DockerfileInstruction",
     "EnvironmentManager",
     "EnvironmentManagerSpec",

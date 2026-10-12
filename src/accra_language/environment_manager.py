@@ -42,8 +42,10 @@ class EnvironmentManager(ABC):
         return dependencies
 
     @abstractmethod
-    def setup(self) -> AccraResult:
-        """Installation of the language toolchain (e.g. language compiler / interpreter, package manager) and setup of the environment (e.g. venv for Python)."""
+    def pre_dependencies_installation(self) -> AccraResult:
+        """Work needed to be done before dependencies are installed.
+
+        This could include installation of the language toolchain (e.g. language compiler / interpreter, package manager) and setup of the environment (e.g. venv for Python)."""
         return AccraResult()
 
     @abstractmethod
@@ -78,7 +80,7 @@ class EnvironmentManager(ABC):
         self.selected_language_version = next(iter(sorted(supported_versions)))
         return self.selected_language_version
 
-    def install_dependencies(self) -> AccraResult:
+    def dependencies_installation(self) -> AccraResult:
         """Installs all project dependencies."""
 
         result = AccraResult()
@@ -97,8 +99,10 @@ class EnvironmentManager(ABC):
 
         return result
 
-    def build(self) -> AccraResult:
-        """Build / compile the project."""
+    def post_dependencies_installation(self) -> AccraResult:
+        """Work needed to be done after all dependencies are present.
+
+        This could include building / compiling the project."""
         return AccraResult()
 
 

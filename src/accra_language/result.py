@@ -2,7 +2,7 @@ from typing import Self
 
 from pydantic import BaseModel, Field
 
-from .dockerfile import DockerfileInstruction
+from .dockerfile import Dockerfile
 from .error import AccraError
 
 
@@ -13,7 +13,7 @@ class AccraResult(BaseModel):
     If the `success` field is False, an unrecoverable error was encountered such that the plugin cannot execute any further procedures.
     """
 
-    dockerfile: list[DockerfileInstruction] = Field(default_factory=list)
+    dockerfile: Dockerfile = Field(default_factory=Dockerfile)
     errors: list[AccraError] = Field(default_factory=list)
     success: bool = True
 
