@@ -27,6 +27,13 @@ class Manifest(ABC):
         """Returns all dependencies listed in the manifest."""
         return None
 
+    def observed_imports(self) -> set[str]:
+        """Returns the top-level modules the project is observed to import.
+
+        Manifests that read the source (not only declared dependencies)
+        override this."""
+        return set()
+
     @abstractmethod
     def get_supported_language_versions(self) -> set[str] | AccraError:
         """Returns all language versions that are allowed by the manifest."""

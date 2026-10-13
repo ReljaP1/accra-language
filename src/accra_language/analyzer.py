@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Config
 from .error import AccraAnalysisError, AccraInstallError
@@ -15,7 +15,9 @@ class Metrics(Enum):
     PARALLELISM = "parallelism"
 
 
+# NOTE profiles are frozen (hence hashable), so they hold tuples, not lists
 class Profile(BaseModel):
+    model_config = ConfigDict(frozen=True)
     duration_ms: int
 
 
@@ -30,24 +32,26 @@ class MemoryProfile(Profile):
 
 
 class LibraryUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
     name: str
     count: int | None = None
 
 
 class NetworkProfile(Profile):
     requires_network: bool = False
-    dependencies: list[str] = Field(default_factory=list)
-    imports: list[LibraryUsage] = Field(default_factory=list)
-    api_calls: list[LibraryUsage] = Field(default_factory=list)
-    web_frameworks: list[LibraryUsage] = Field(default_factory=list)
+    dependencies: tuple[str, ...] = ()
+    imports: tuple[LibraryUsage, ...] = ()
+    api_calls: tuple[LibraryUsage, ...] = ()
+    web_frameworks: tuple[LibraryUsage, ...] = ()
 
 
 class ParallelismUsage(BaseModel):
+    model_config = ConfigDict(frozen=True)
     used: bool = False
-    modules: list[str] = Field(default_factory=list)
+    modules: tuple[str, ...] = ()
 
 
-class ParallelismProfile(BaseModel):
+class ParallelismProfile(Profile):
     multithreading: ParallelismUsage = Field(default_factory=ParallelismUsage)
     multiprocessing: ParallelismUsage = Field(default_factory=ParallelismUsage)
 
