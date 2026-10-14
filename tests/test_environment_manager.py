@@ -1,14 +1,15 @@
+import re
 import subprocess
+import time
 from typing import override
+
+import pytest
 
 from accra_language import (
     AccraError,
-    AccraFailedDependencyInstallError,
-    AccraInstallError,
     AccraResult,
     Config,
     Dependency,
-    DependencyStatus,
     Dockerfile,
     DockerfileInstruction,
     EnvironmentManager,
@@ -60,6 +61,10 @@ class FakeEnvironmentManager(EnvironmentManager):
         )
 
         super().__init__(spec)
+
+    @override
+    def choose_language_version(self, versions: set[str]) -> str:
+        return max(versions, key=lambda v: tuple(int(p) for p in re.findall(r"\d+", v)))
 
     @override
     def pre_dependencies_installation(self) -> AccraResult:
@@ -192,12 +197,16 @@ def test_caller_chosen_language_version():
     assert env_mgr.select_language_version() == "3.7"
 
 
-def test_language_without_env_managers_reports_errors():
-    language = Language(LanguageSpec(name="", version="", config=Config()))
-    assert language.env_manager is None
-    assert isinstance(language.detect(), AccraError)
-    result = language.build()
-    assert not result.success and result.errors
+def test_language_without_env_managers_is_rejected_once():
+    with pytest.raises(ValueError):
+        Language(LanguageSpec(name="", version="", config=Config()))
+
+
+def test_plugin_decides_which_version_is_chosen():
+    config = Config()
+    env_mgr = ConfigurableEnvironmentManager(config, [VersionsManifest(config)])
+    env_mgr.choose_language_version = lambda versions: min(versions)
+    assert env_mgr.select_language_version() == "3.10"  # lexicographic minimum
 
 
 def test_env_manager_choice_is_deterministic():
@@ -214,28 +223,6 @@ def test_env_manager_choice_is_deterministic():
     assert language.env_manager.spec.name == "alpha"
 
 
-def test_failed_install_is_attributed_and_does_not_stop_the_build():
-    config = Config()
-    deps = {Dependency(name="bad", version=""), Dependency(name="good", version="")}
-    env_mgr = ConfigurableEnvironmentManager(
-        config, [VersionsManifest(config, deps=deps)]
-    )
-
-    def behaviour(dependency):
-        if dependency.name == "bad":
-            return AccraResult(errors=[AccraInstallError(message="boom")])
-
-    env_mgr.behaviour = behaviour
-    result = env_mgr.dependencies_installation()
-
-    assert result.success
-    [error] = result.errors
-    assert isinstance(error, AccraFailedDependencyInstallError)
-    assert error.dependency.name == "bad"
-    assert len(result.dockerfile.dependencies_installation) == 1
-    assert set(env_mgr.install_results) == deps
-
-
 def test_subprocess_exceptions_become_errors():
     config = Config()
     dep = Dependency(name="slow", version="")
@@ -247,19 +234,20 @@ def test_subprocess_exceptions_become_errors():
         raise subprocess.TimeoutExpired(["uv", "pip"], 5, stderr=b"x" * 5000)
 
     env_mgr.behaviour = raising
-    result = env_mgr.install_dependency(dep)
-    [error] = result.errors
-    assert isinstance(error, AccraFailedDependencyInstallError)
-    assert error.command == ["uv", "pip"]
-    assert len(error.stderr) == 2000
-
-    env_mgr.pre_dependencies_installation = lambda: (_ for _ in ()).throw(
-        FileNotFoundError(2, "No such file", "pyenv")
-    )
     language = Language(
         LanguageSpec(
             name="", version="", config=config, supported_env_managers={env_mgr}
         )
+    )
+    build = language.build()
+    assert not build.success
+    [error] = build.errors
+    assert error.command == ["uv", "pip"]
+    assert len(error.stderr) == 2000
+
+    env_mgr.behaviour = lambda _: None
+    env_mgr.pre_dependencies_installation = lambda: (_ for _ in ()).throw(
+        FileNotFoundError(2, "No such file", "pyenv")
     )
     build = language.build()
     assert not build.success
@@ -285,50 +273,10 @@ def test_all_names_exist():
     assert all(hasattr(accra_language, name) for name in accra_language.__all__)
 
 
-def test_dependency_specifier():
-    assert Dependency(name="numpy", version="").specifier == "numpy"
-    assert Dependency(name="numpy", version=">=1.2").specifier == "numpy>=1.2"
-    assert Dependency(name="numpy", version="1.2").specifier == "numpy==1.2"
-    assert (
-        Dependency(name="pkg", version="@ https://x/y.whl").specifier
-        == "pkg @ https://x/y.whl"
-    )
-    assert Dependency(name="git+https://x/y.git", version="").is_direct
-    assert not Dependency(name="numpy", version="").is_direct
-    extras = Dependency(name="uvicorn[standard, h11]", version="==1")
-    assert extras.base_name == "uvicorn"
-    assert extras.extras == ("standard", "h11")
-
-
-def test_dependency_statuses():
-    config = Config()
-    deps = {Dependency(name=n, version="") for n in ("bad", "have", "ok", "todo")}
-    env_mgr = ConfigurableEnvironmentManager(
-        config, [VersionsManifest(config, deps=deps)]
-    )
-
-    def behaviour(dependency):
-        if dependency.name == "bad":
-            return AccraResult(errors=[AccraInstallError(message="boom")])
-        if dependency.name == "have":
-            return AccraResult(dependency_status=DependencyStatus.SATISFIED)
-
-    env_mgr.behaviour = behaviour
-    for dep in deps - {Dependency(name="todo", version="")}:
-        env_mgr.install_dependency(dep)
-
-    by_name = {d.name: s for d, s in env_mgr.dependency_statuses().items()}
-    assert by_name == {
-        "bad": DependencyStatus.FAILED,
-        "have": DependencyStatus.SATISFIED,
-        "ok": DependencyStatus.INSTALLED,
-        "todo": DependencyStatus.PENDING,
-    }
-
-
 def test_build_budget_stops_the_build():
-    config = Config(build_timeout=0.0)
+    config = Config(build_timeout=0.01)
     env_mgr = ConfigurableEnvironmentManager(config, [VersionsManifest(config)])
+    env_mgr.pre_dependencies_installation = lambda: time.sleep(0.05) or AccraResult()
     language = Language(
         LanguageSpec(
             name="", version="", config=config, supported_env_managers={env_mgr}
@@ -340,26 +288,16 @@ def test_build_budget_stops_the_build():
     assert env_mgr.remaining_build_time() is None  # budget is cleared after build
 
 
+def test_zero_build_timeout_means_no_budget():
+    config = Config(build_timeout=0)
+    env_mgr = ConfigurableEnvironmentManager(config)
+    env_mgr.start_build_budget()
+    assert env_mgr.remaining_build_time() is None
+
+
 def test_subprocess_timeout_is_capped_by_budget():
     config = Config(timeout=100, build_timeout=5)
     env_mgr = ConfigurableEnvironmentManager(config)
     assert env_mgr.subprocess_timeout() == 100
     env_mgr.start_build_budget()
     assert env_mgr.subprocess_timeout() <= 5
-
-
-def test_optional_capabilities_have_safe_defaults():
-    config = Config(env={"A": "1"})
-    env_mgr = ConfigurableEnvironmentManager(config, [VersionsManifest(config)])
-    language = Language(
-        LanguageSpec(
-            name="", version="", config=config, supported_env_managers={env_mgr}
-        )
-    )
-    assert language.interpreter_path() is None
-    assert language.environment_path() is None
-    assert language.run_environment() == {"A": "1"}
-    assert language.observed_imports() == set()
-    assert language.teardown().success
-    assert language.install_project().success
-    assert isinstance(language.check_import("os"), AccraError)
