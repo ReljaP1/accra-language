@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -19,8 +20,18 @@ class Manifest(ABC):
 
     @abstractmethod
     def detect(self) -> bool:
-        """Returns True if the manifest is present in the project, False otherwise."""
+        """Returns True if the manifest is present in the project, False otherwise.
+
+        Must not raise, and must be cheap and read-only: `Language.is_present()`
+        relies on it."""
         return False
+
+    def path(self) -> Path | None:
+        """The manifest's file, when it is one (`cwd/<spec.name>` exists)."""
+        if self.spec.config.cwd is None:
+            return None
+        candidate = Path(self.spec.config.cwd) / self.spec.name
+        return candidate if candidate.is_file() else None
 
     @abstractmethod
     def extract_dependencies(self) -> set[Dependency] | None:

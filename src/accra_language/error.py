@@ -74,3 +74,14 @@ class AccraRunError(AccraError):
 
 class AccraAnalysisError(AccraError):
     pass
+
+
+class AccraNoSamplesError(AccraAnalysisError):
+    """The run ended before the analyzer could measure it (e.g. a profiler
+    that samples got no sample)."""
+
+
+class AccraUnsupportedError(AccraError):
+    """The plugin does not implement this capability. Distinct from an error
+    that says the input is invalid or the operation failed: a caller treats it
+    as "cannot be decided", not as a failure of what was asked about."""
