@@ -1,7 +1,6 @@
-import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 
@@ -19,7 +18,9 @@ from .manifest import Manifest
 from .result import AccraResult
 from .run import EntryPoint
 
-_logger = logging.getLogger(__name__)
+# Orders language versions, most preferred first. The plugin defines what
+# "best" means (newest, an LTS, ...) and how versions compare.
+VersionOrder = Callable[[set[str]], Sequence[str]]
 
 
 class EnvironmentManagerSpec(BaseModel):
@@ -27,6 +28,9 @@ class EnvironmentManagerSpec(BaseModel):
     version: str
     config: Config
     supported_manifests: set[InstanceOf[Manifest]] = Field(default_factory=set)
+    # the plugin's preference among the versions a project allows; without
+    # one, versions are ordered alphabetically
+    version_order: VersionOrder | None = None
 
 
 class EnvironmentManager(ABC):
@@ -126,8 +130,7 @@ class EnvironmentManager(ABC):
 
     def project_names(self) -> set[str]:
         """The names under which the project refers to itself (its modules,
-        packages, crates or artifacts), never dependencies. Read-only;
-        `Language.project_names()` gives empty if it raises."""
+        packages, crates or artifacts), never dependencies. Read-only."""
         return set()
 
     def has_project_install(self) -> bool:
@@ -179,19 +182,10 @@ class EnvironmentManager(ABC):
         """Installs a dependency."""
         return AccraResult()
 
-    @abstractmethod
-    def choose_language_version(self, versions: set[str]) -> str:
-        """Chooses one of the language versions that every present manifest
-        allows (`versions` is never empty).
-
-        The plugin defines what "best" means (newest, an LTS, ...) and how
-        versions order."""
-        ...
-
     def supported_language_versions(self) -> set[str] | AccraError:
         """The language versions every present manifest allows, e.g.
-        so a caller can retry with another one. Never raises. A manifest may return
-        any set (e.g. a `frozenset`); anything else is an error naming it."""
+        so a caller can retry with another one. A manifest may return any set
+        (e.g. a `frozenset`); anything else is an error naming it."""
 
         if not self.present_manifests:
             return AccraInstallError(
@@ -201,15 +195,7 @@ class EnvironmentManager(ABC):
         supported_versions_from_manifests: list[set[str]] = []
 
         for manifest in sorted(self.present_manifests, key=lambda m: m.spec.name):
-            try:
-                result: set[str] | AccraError = (
-                    manifest.get_supported_language_versions()
-                )
-            except Exception as exc:  # noqa: BLE001 never-raises contract
-                return AccraInstallError.from_exception(
-                    exc,
-                    f"could not get supported language versions from {manifest.spec.name}",
-                )
+            result: set[str] | AccraError = manifest.get_supported_language_versions()
 
             match result:
                 case AbstractSet():
@@ -238,39 +224,37 @@ class EnvironmentManager(ABC):
 
         return supported_versions
 
-    def select_language_version(self) -> str | AccraError:
-        """Selects a language version that works for the project and its dependencies.
+    def ranked_language_versions(
+        self, order: VersionOrder | None = None
+    ) -> list[str] | AccraError:
+        """The language versions every present manifest allows, most preferred
+        first: by `order`, else the spec's `version_order`, else alphabetically.
+        Versions `order` leaves out come last, alphabetically, and ones it
+        invents are dropped, so every supported version appears once."""
 
-        The plugin chooses one of `supported_language_versions()` with
-        `choose_language_version`. Never raises."""
+        supported: set[str] | AccraError = self.supported_language_versions()
+        if isinstance(supported, AccraError):
+            return supported
+
+        ordering = order or self.spec.version_order or sorted
+        ranked = [v for v in dict.fromkeys(ordering(supported)) if v in supported]
+        return ranked + sorted(supported - set(ranked))
+
+    def select_language_version(
+        self, order: VersionOrder | None = None
+    ) -> str | AccraError:
+        """Selects a language version that works for the project and its
+        dependencies: the first of `ranked_language_versions(order)`, or the
+        version the caller chose in `Config.language_version`."""
 
         if self.selected_language_version:
             return self.selected_language_version
 
-        supported_versions: set[str] | AccraError = self.supported_language_versions()
-        if isinstance(supported_versions, AccraError):
-            return supported_versions
+        ranked: list[str] | AccraError = self.ranked_language_versions(order)
+        if isinstance(ranked, AccraError):
+            return ranked
 
-        try:
-            chosen = self.choose_language_version(supported_versions)
-        except Exception as exc:  # noqa: BLE001 never-raises contract
-            return AccraInstallError.from_exception(
-                exc, "could not choose a language version"
-            )
-        if not isinstance(chosen, str) or chosen not in supported_versions:
-            return AccraInstallError(
-                message=(
-                    f"could not choose a language version: {chosen!r} is not one "
-                    f"of {sorted(supported_versions)}"
-                )
-            )
-        self.selected_language_version = chosen
-        _logger.debug(
-            "env manager %s: chose language version %s of %s",
-            self.spec.name,
-            chosen,
-            sorted(supported_versions),
-        )
+        self.selected_language_version = ranked[0]
         return self.selected_language_version
 
     def dependencies_installation(self) -> AccraResult:
@@ -287,30 +271,13 @@ class EnvironmentManager(ABC):
 
         for dependency in dependencies_sorted:
             if self.build_budget_exhausted():
-                _logger.debug("build budget exhausted during dependencies")
                 result.errors.append(
                     AccraBuildError(message="build time budget exhausted")
                 )
                 result.success = False
                 return result
 
-            try:
-                installed = self._install_dependency(dependency)
-            except Exception as exc:  # noqa: BLE001 never-raises contract
-                # one dependency must not cost the others: record it failed
-                # (`success` stays True) and go on
-                base = AccraInstallError.from_exception(
-                    exc, f"could not install dependency: {dependency.name}"
-                )
-                result.errors.append(
-                    AccraFailedDependencyInstallError(
-                        **base.model_dump(),
-                        dependency=dependency,
-                        environment_manager=self,
-                    )
-                )
-                continue
-            result.extend(installed)
+            result.extend(self._install_dependency(dependency))
             if not result.success:
                 return result
 
@@ -327,4 +294,4 @@ class EnvironmentManager(ABC):
 # with environment_manager field.
 class AccraFailedDependencyInstallError(AccraInstallError, BaseModel):
     dependency: Dependency
-    environment_manager: InstanceOf[EnvironmentManager] | None = None
+    environment_manager: InstanceOf[EnvironmentManager]

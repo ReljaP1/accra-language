@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 
 from test_environment_manager import ConfigurableEnvironmentManager, FakeManifest
@@ -79,21 +78,3 @@ def test_versions_compare_numerically():
     assert language.env_manager.spec.version == "2.1"
     assert _version_key("10") > _version_key("9")
     assert _version_key("1.0a") != _version_key("1.0")  # text part does not raise
-
-
-def test_selection_is_logged_at_debug_without_handlers(caplog):
-    config = Config()
-    manager = ConfigurableEnvironmentManager(config)
-    language = Language(
-        LanguageSpec(
-            name="bare",
-            version="1",
-            config=config,
-            supported_env_managers={manager},
-        )
-    )
-    with caplog.at_level(logging.DEBUG, logger="accra_language"):
-        language.detect()
-    assert any("selected env manager" in r.message for r in caplog.records)
-    handlers = logging.getLogger("accra_language").handlers
-    assert any(isinstance(h, logging.NullHandler) for h in handlers)

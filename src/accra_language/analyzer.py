@@ -113,7 +113,7 @@ class Analyzer(ABC):
         output_dir: Path | None = None,
     ) -> set[Profile] | AccraAnalysisError:
         """Runs `entry_point` with `args` in `env_manager`'s environment and
-        measures it. Never raises.
+        measures it, returning an error instead of raising.
 
         - `env`: the whole process environment of the run, e.g. the caller's
           run environment plus the run's own variables; None for
@@ -143,5 +143,5 @@ class ProjectAnalyzer(ABC):
         self, env_manager: EnvironmentManager
     ) -> set[Profile] | AccraAnalysisError:
         """Reads the project of `env_manager` (its `Config.cwd`, its manifests'
-        dependencies) and returns what it measured. Never raises."""
+        dependencies) and returns what it measured (an error instead of raising)."""
         ...

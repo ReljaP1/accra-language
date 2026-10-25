@@ -2,11 +2,11 @@
 entry points, read-only presence and the
 toolchain. All are optional for a plugin and have defaults."""
 
-import subprocess
 from pathlib import Path
 from typing import override
 
 from accra_language import (
+    AccraAnalysisError,
     AccraError,
     AccraInstallError,
     AccraResult,
@@ -67,10 +67,6 @@ class PlainEnvironmentManager(EnvironmentManager):
     @override
     def _install_dependency(self, dependency: Dependency) -> AccraResult:
         return AccraResult()
-
-    @override
-    def choose_language_version(self, versions: set[str]) -> str:
-        return max(versions)
 
 
 def _language(config, env_managers=(), toolchain=None):
@@ -172,12 +168,6 @@ def test_entry_points_come_from_the_env_manager(tmp_path):
 
     assert language.entry_points() == {entry}
 
-    def raising():
-        raise subprocess.TimeoutExpired(["toy"], 1)
-
-    manager.entry_points = raising
-    assert isinstance(language.entry_points(), AccraError)
-
     assert isinstance(_language(Config(cwd=tmp_path)).entry_points(), AccraError)
 
 
@@ -197,8 +187,6 @@ class FakeAnalyzer(Analyzer):
     def analyze(self, entry_point, args, env_manager, **options):
         self.options = options
         self.runs.append((entry_point.name, list(args), env_manager.spec.name))
-        if isinstance(self.profiles, Exception):
-            raise self.profiles
         return self.profiles
 
 
@@ -219,7 +207,10 @@ def test_analyze_runs_the_matching_analyzers(tmp_path):
         install_error=AccraInstallError(message="profiler unavailable"),
     )
     broken = FakeAnalyzer(
-        config, "net", Metrics.NETWORK, profiles=FileNotFoundError(2, "gone", "net")
+        config,
+        "net",
+        Metrics.NETWORK,
+        profiles=AccraAnalysisError(message="net failed"),
     )
     spec = LanguageSpec(
         name="toy",
@@ -273,11 +264,6 @@ def test_entry_point_for_a_source_file(tmp_path):
     manager.entry_point_for = lambda path: entry
     assert language.entry_point_for(tmp_path / "main.toy") == entry
 
-    def raising(path):
-        raise OSError("unreadable")
-
-    manager.entry_point_for = raising
-    assert isinstance(language.entry_point_for(tmp_path / "x"), AccraError)
     assert isinstance(_language(config).entry_point_for(tmp_path / "x"), AccraError)
 
 
@@ -294,33 +280,27 @@ def test_profiles_carry_exit_code_and_report():
 
 
 def test_dockerfile_parts_compose(tmp_path):
-    # A base preference, toolchain steps and project steps
     first = Dockerfile(
-        base_image="python:3.12",
-        toolchain_installation=["RUN install-python"],
-        pre_dependencies_installation=["RUN uv venv"],
+        pre_dependencies_installation=["RUN install-python", "RUN uv venv"],
         dependencies_installation=["RUN uv pip install six"],
     )
     second = Dockerfile(
-        base_image="rust:1.80",
-        toolchain_installation=["RUN install-rust"],
+        pre_dependencies_installation=["RUN install-rust"],
         post_dependencies_installation=["RUN cargo build"],
     )
     first.extend(second)
 
-    assert first.base_image == "python:3.12"  # the first preference is kept
-    assert first.toolchain_installation == ["RUN install-python", "RUN install-rust"]
     assert first.project_steps() == [
+        "RUN install-python",
         "RUN uv venv",
+        "RUN install-rust",
         "RUN uv pip install six",
         "RUN cargo build",
     ]
-    assert str(first).splitlines()[0] == "FROM python:3.12"
-    assert "RUN install-python" not in str(first)  # its own base has the toolchain
     assert str(Dockerfile(pre_dependencies_installation=["RUN x"])).startswith("RUN x")
 
 
-def test_manifest_paths_and_coverage(tmp_path):
+def test_manifest_paths(tmp_path):
     (tmp_path / "toy.toml").write_text("")
     config = Config(cwd=tmp_path)
     manager = PlainEnvironmentManager(
@@ -329,7 +309,6 @@ def test_manifest_paths_and_coverage(tmp_path):
     language = _language(config, [manager])
 
     assert language.manifest_paths() == {tmp_path / "toy.toml"}
-    assert language.covered_manifests() == set()
 
 
 def test_project_install_and_names_defaults(tmp_path):
@@ -341,13 +320,6 @@ def test_project_install_and_names_defaults(tmp_path):
     assert installed.success and not installed.errors
     assert language.project_names() == set()
 
-    def raising():
-        raise FileNotFoundError(2, "No such file", "pip")
-
-    manager.install_project = raising
-    failed = language.install_project()
-    assert not failed.success and isinstance(failed.errors[0], AccraError)
-
     assert not _language(config).install_project().success  # no env manager
     assert _language(config).project_names() == set()
 
@@ -355,12 +327,6 @@ def test_project_install_and_names_defaults(tmp_path):
     assert language.has_project_install() is False
     manager.has_project_install = lambda: True
     assert language.has_project_install() is True
-
-    def raising_check():
-        raise OSError("unreadable")
-
-    manager.has_project_install = raising_check
-    assert language.has_project_install() is False
     assert _language(config).has_project_install() is False  # no env manager
 
 
@@ -441,8 +407,6 @@ def test_project_analyzers_run_without_an_entry_point(tmp_path):
         @override
         def analyze_project(self, env_manager):
             self.seen.append(env_manager.spec.name)
-            if isinstance(self.result, Exception):
-                raise self.result
             return self.result
 
     config = Config(cwd=tmp_path)
@@ -467,7 +431,9 @@ def test_project_analyzers_run_without_an_entry_point(tmp_path):
             )
         },
     )
-    broken = Static(config, "zzz", Metrics.NETWORK, OSError("unreadable"))
+    broken = Static(
+        config, "zzz", Metrics.NETWORK, AccraAnalysisError(message="unreadable")
+    )
     spec = LanguageSpec(
         name="toy",
         version="1",

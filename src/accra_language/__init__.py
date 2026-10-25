@@ -1,5 +1,3 @@
-import logging
-
 from .analyzer import (
     Analyzer,
     AnalyzerSpec,
@@ -43,8 +41,6 @@ from .script import (
     ScriptReading,
 )
 from .toolchain import Toolchain
-
-logging.getLogger("accra_language").addHandler(logging.NullHandler())
 
 __all__ = [
     "AccraAnalysisError",
