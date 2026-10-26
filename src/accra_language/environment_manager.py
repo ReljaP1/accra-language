@@ -50,11 +50,6 @@ class EnvironmentManager(ABC):
         budget = self.spec.config.build_timeout
         self._deadline = time.monotonic() + budget if budget else None
 
-    def resume_build_budget(self, seconds: float) -> None:
-        """Restarts the build budget with `seconds` left (what an earlier
-        `build()` did not use), for `install_project()`."""
-        self._deadline = time.monotonic() + seconds
-
     def end_build_budget(self) -> None:
         self._deadline = None
 
@@ -116,28 +111,10 @@ class EnvironmentManager(ABC):
             success=False,
         )
 
-    def is_usable(self, dependency: Dependency) -> bool | AccraError:
-        """Whether the built environment can use `dependency` (for Python,
-        whether it imports)."""
-        return AccraUnsupportedError(
-            message=f"{self.spec.name} cannot check whether a dependency is usable"
-        )
-
-    def install_project(self) -> AccraResult:
-        """Installs the project itself into the built environment,
-        with the Dockerfile lines that do the same; nothing by default."""
-        return AccraResult()
-
     def project_names(self) -> set[str]:
         """The names under which the project refers to itself (its modules,
         packages, crates or artifacts), never dependencies. Read-only."""
         return set()
-
-    def has_project_install(self) -> bool:
-        """Whether the project has an install step of its own (e.g. a build
-        manifest), so `install_project()` installs it; without one the project
-        runs from its sources. False by default."""
-        return False
 
     # -- running (optional) ------------------------------------------
 
@@ -284,9 +261,15 @@ class EnvironmentManager(ABC):
         return result
 
     def post_dependencies_installation(self) -> AccraResult:
-        """Work needed to be done after all dependencies are present.
+        """Work needed to be done after all dependencies are present: installing
+        or building the project itself, with the Dockerfile lines that do the
+        same.
 
-        This could include building / compiling the project."""
+        A language that cannot run from its sources (it needs a compile step)
+        returns `success=False` when that fails, which fails the build. A
+        language that can run from its sources (e.g. Python) never does: it
+        records what went wrong in `AccraResult.errors` and leaves `success`
+        True, as the project is still usable."""
         return AccraResult()
 
 

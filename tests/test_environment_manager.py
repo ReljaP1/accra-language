@@ -486,14 +486,9 @@ def test_read_only_hooks_do_not_swallow_a_raise(tmp_path):
         def project_names(self):
             raise ValueError("x")
 
-        def has_project_install(self):
-            raise ValueError("x")
-
     language = _language(Bad(_config(tmp_path), {"1.0"}), tmp_path)
     with pytest.raises(ValueError):
         language.project_names()
-    with pytest.raises(ValueError):
-        language.has_project_install()
 
     class BadLanguage(Language):
         def is_present(self):
@@ -504,54 +499,3 @@ def test_read_only_hooks_do_not_swallow_a_raise(tmp_path):
     )
     with pytest.raises(ValueError):
         language.is_present()
-
-
-def test_install_project_runs_under_remaining_build_budget():
-    config = Config(build_timeout=100, timeout=1000)
-    env_mgr = ConfigurableEnvironmentManager(config, [VersionsManifest(config)])
-    seen = []
-    env_mgr.install_project = lambda: (
-        seen.append(env_mgr.subprocess_timeout()) or (AccraResult())
-    )
-    language = Language(
-        LanguageSpec(
-            name="", version="", config=config, supported_env_managers={env_mgr}
-        )
-    )
-    assert language.build().success
-    assert language.install_project().success
-    assert seen and seen[0] <= 100
-    assert env_mgr.remaining_build_time() is None  # ended again
-
-    language._build_time_left = 0.0
-    result = language.install_project()
-    assert not result.success and "budget" in result.errors[0].message
-
-
-def test_analyzer_install_cache_resets_on_build_and_caches_failures():
-    from test_multi_language_contract import FakeAnalyzer
-
-    from accra_language import AccraInstallError
-    from accra_language.analyzer import Metrics
-
-    config = Config()
-    bad = FakeAnalyzer(
-        config, "bad", Metrics.LOAD, install_error=AccraInstallError(message="no")
-    )
-    good = FakeAnalyzer(config, "good", Metrics.MEMORY)
-    env_mgr = ConfigurableEnvironmentManager(config, [VersionsManifest(config)])
-    language = Language(
-        LanguageSpec(
-            name="",
-            version="",
-            config=config,
-            supported_env_managers={env_mgr},
-            analyzers={bad, good},
-        )
-    )
-    language.install_analyzers()
-    language.install_analyzers()
-    assert bad.installs == 1 and good.installs == 1
-    language.build()
-    language.install_analyzers()
-    assert bad.installs == 2 and good.installs == 2

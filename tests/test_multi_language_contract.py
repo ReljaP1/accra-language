@@ -8,8 +8,8 @@ from typing import override
 from accra_language import (
     AccraAnalysisError,
     AccraError,
-    AccraInstallError,
     AccraResult,
+    AnalysisRun,
     Analyzer,
     AnalyzerSpec,
     Config,
@@ -91,7 +91,6 @@ def test_environment_fact_defaults(tmp_path):
     assert isinstance(manager.installed_dependencies(), AccraError)
     uninstall = manager.uninstall_dependencies([Dependency(name="foo", version="")])
     assert not uninstall.success and uninstall.errors
-    assert isinstance(manager.is_usable(Dependency(name="foo", version="")), AccraError)
     assert manager.entry_points() == set()
 
 
@@ -172,25 +171,20 @@ def test_entry_points_come_from_the_env_manager(tmp_path):
 
 
 class FakeAnalyzer(Analyzer):
-    def __init__(self, config, name, metric, install_error=None, profiles=None):
+    """Measures each run it is given with `profiles`."""
+
+    def __init__(self, config, name, metric, profiles=None):
         super().__init__(AnalyzerSpec(name=name, config=config, metrics={metric}))
-        self.install_error = install_error
         self.profiles = profiles if profiles is not None else set()
-        self.runs = []
+        self.calls = []
 
     @override
-    def install(self, env_manager):
-        self.installs = getattr(self, "installs", 0) + 1
-        return self.install_error
-
-    @override
-    def analyze(self, entry_point, args, env_manager, **options):
-        self.options = options
-        self.runs.append((entry_point.name, list(args), env_manager.spec.name))
-        return self.profiles
+    def analyze_project(self, env_manager, runs=()):
+        self.calls.append(([run.entry_point.name for run in runs], env_manager))
+        return {run.entry_point: self.profiles for run in runs}
 
 
-def test_analyze_runs_the_matching_analyzers(tmp_path):
+def test_analyze_project_runs_the_matching_analyzers_on_the_runs(tmp_path):
     config = Config(cwd=tmp_path)
     memory = FakeAnalyzer(
         config,
@@ -199,12 +193,6 @@ def test_analyze_runs_the_matching_analyzers(tmp_path):
         profiles={
             MemoryProfile(duration_ms=5, peak_memory_mb=1.0, total_memory_mb=2.0)
         },
-    )
-    load = FakeAnalyzer(
-        config,
-        "cpu",
-        Metrics.LOAD,
-        install_error=AccraInstallError(message="profiler unavailable"),
     )
     broken = FakeAnalyzer(
         config,
@@ -217,40 +205,37 @@ def test_analyze_runs_the_matching_analyzers(tmp_path):
         version="1",
         config=config,
         supported_env_managers={PlainEnvironmentManager(config)},
-        analyzers={memory, load, broken},
+        analyzers={memory, broken},
     )
     language = Language(spec)
     entry = EntryPoint(name="main", kind="script", command=("toy", "main"))
+    run = AnalysisRun(
+        entry_point=entry,
+        args=("--n", "3"),
+        env={"A": "1"},
+        timeout=5,
+        output_dir=tmp_path,
+    )
 
-    results = language.analyze(entry, ["--n", "3"])
+    results = language.analyze_project(runs=[run])
 
-    assert list(results) == ["cpu", "mem", "net"]  # name order
-    assert isinstance(results["cpu"], AccraInstallError) and load.runs == []
-    assert results["mem"] == memory.profiles
-    assert memory.runs == [("main", ["--n", "3"], "plain")]
-    assert isinstance(results["net"], AccraError)
+    assert list(results) == ["mem", "net"]  # name order
+    assert results["mem"] == {entry: memory.profiles}
+    assert isinstance(results["net"][entry], AccraError)
+    assert memory.calls[0][0] == ["main"] and memory.calls[0][1].spec.name == "plain"
 
-    only_memory = language.analyze(entry, [], metrics={Metrics.MEMORY})
+    # the run's arguments, environment, timeout and report directory reach the analyzer
+    assert run.args == ("--n", "3") and run.env == {"A": "1"}
+    assert run.timeout == 5 and run.output_dir == tmp_path
+
+    only_memory = language.analyze_project({Metrics.MEMORY}, [run])
     assert list(only_memory) == ["mem"]
 
+    # no env manager: the error stands for the whole project
     no_manager = Language(
         LanguageSpec(name="toy", version="1", config=config, analyzers={memory})
     )
-    assert isinstance(no_manager.analyze(entry, [])["mem"], AccraError)
-
-    # installed once per language, whatever the number of runs
-    assert memory.installs == 1
-    assert language.install_analyzers({Metrics.MEMORY}) == {"mem": None}
-    assert memory.installs == 1
-    assert isinstance(language.install_analyzers()["cpu"], AccraInstallError)
-
-    # the run's environment, timeout and report directory reach the analyzer
-    language.analyze(
-        entry, [], {Metrics.MEMORY}, env={"A": "1"}, timeout=5, output_dir=tmp_path
-    )
-    assert memory.options == {"env": {"A": "1"}, "timeout": 5, "output_dir": tmp_path}
-    language.analyze(entry, [], {Metrics.MEMORY})
-    assert memory.options == {}
+    assert isinstance(no_manager.analyze_project(runs=[run])["mem"][None], AccraError)
 
 
 def test_entry_point_for_a_source_file(tmp_path):
@@ -311,23 +296,12 @@ def test_manifest_paths(tmp_path):
     assert language.manifest_paths() == {tmp_path / "toy.toml"}
 
 
-def test_project_install_and_names_defaults(tmp_path):
+def test_project_names_default(tmp_path):
     config = Config(cwd=tmp_path)
-    manager = PlainEnvironmentManager(config)
-    language = _language(config, [manager])
+    language = _language(config, [PlainEnvironmentManager(config)])
 
-    installed = language.install_project()
-    assert installed.success and not installed.errors
     assert language.project_names() == set()
-
-    assert not _language(config).install_project().success  # no env manager
-    assert _language(config).project_names() == set()
-
-    # without an install step of its own, the project runs from its sources
-    assert language.has_project_install() is False
-    manager.has_project_install = lambda: True
-    assert language.has_project_install() is True
-    assert _language(config).has_project_install() is False  # no env manager
+    assert _language(config).project_names() == set()  # no env manager
 
 
 def test_supported_versions_are_available_without_choosing(tmp_path):
@@ -388,26 +362,25 @@ def test_runs_and_documentation_are_unread_by_default(tmp_path):
     assert (docs.summary, docs.description_excerpt, docs.project_urls) == ("", "", ())
 
 
-def test_project_analyzers_run_without_an_entry_point(tmp_path):
+def test_static_analyzers_need_no_runs(tmp_path):
     # static analyses of the sources (network, parallelism)
     from accra_language import (
         FileModules,
         NetworkProfile,
         ParallelismProfile,
         ParallelismUsage,
-        ProjectAnalyzer,
     )
 
-    class Static(ProjectAnalyzer):
+    class Static(Analyzer):
         def __init__(self, config, name, metric, result):
             super().__init__(AnalyzerSpec(name=name, config=config, metrics={metric}))
             self.result = result
             self.seen = []
 
         @override
-        def analyze_project(self, env_manager):
+        def analyze_project(self, env_manager, runs=()):
             self.seen.append(env_manager.spec.name)
-            return self.result
+            return {None: self.result}
 
     config = Config(cwd=tmp_path)
     network = Static(
@@ -439,24 +412,22 @@ def test_project_analyzers_run_without_an_entry_point(tmp_path):
         version="1",
         config=config,
         supported_env_managers={PlainEnvironmentManager(config)},
-        project_analyzers={network, threads, broken},
+        analyzers={network, threads, broken},
     )
     language = Language(spec)
 
     results = language.analyze_project()
     assert list(results) == ["net", "par", "zzz"]
-    assert results["net"] == network.result and network.seen == ["plain"]
-    [profile] = results["par"]
+    assert results["net"] == {None: network.result} and network.seen == ["plain"]
+    [profile] = results["par"][None]
     assert profile.multithreading.files[0].path == "a.py"
-    assert isinstance(results["zzz"], AccraError)
+    assert isinstance(results["zzz"][None], AccraError)
     assert list(language.analyze_project({Metrics.PARALLELISM})) == ["par"]
 
     no_manager = Language(
-        LanguageSpec(
-            name="toy", version="1", config=config, project_analyzers={network}
-        )
+        LanguageSpec(name="toy", version="1", config=config, analyzers={network})
     )
-    assert isinstance(no_manager.analyze_project()["net"], AccraError)
+    assert isinstance(no_manager.analyze_project()["net"][None], AccraError)
     assert (
         Language(LanguageSpec(name="toy", version="1", config=config)).analyze_project()
         == {}

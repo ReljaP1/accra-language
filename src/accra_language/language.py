@@ -1,12 +1,12 @@
 import re
 import shutil
 from abc import ABC
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field, InstanceOf
 
-from .analyzer import Analyzer, Metrics, Profile, ProjectAnalyzer
+from .analyzer import AnalysisResults, AnalysisRun, Analyzer, Metrics
 from .config import Config
 from .environment_manager import EnvironmentManager
 from .error import (
@@ -34,8 +34,6 @@ class LanguageSpec(BaseModel):
         default_factory=set
     )
     analyzers: set[InstanceOf[Analyzer]] = Field(default_factory=set)
-    # static analyses of the project's sources (no entry point, no run)
-    project_analyzers: set[InstanceOf[ProjectAnalyzer]] = Field(default_factory=set)
     # the system tools the plugin needs
     toolchain: Toolchain = Field(default_factory=Toolchain)
 
@@ -58,12 +56,6 @@ class Language(ABC):
 
         # the caller's choice, else picked by `detect()` (or `build()`)
         self.env_manager: EnvironmentManager | None = env_manager
-        # analyzers installed into the built environment, by name
-        self._installed_analyzers: set[str] = set()
-        # analyzers whose install failed in this build, with the error
-        self._failed_analyzers: dict[str, AccraError] = {}
-        # build budget left when `build()` ended; None when unbounded
-        self._build_time_left: float | None = None
 
     def _select_env_manager(self) -> EnvironmentManager | AccraError:
         """The environment manager to use: the caller's, else the first of the
@@ -112,33 +104,6 @@ class Language(ABC):
             if (path := manifest.path()) is not None
         }
 
-    def install_project(self) -> AccraResult:
-        """The env manager's `install_project()`; after `build()`.
-        When `Config.build_timeout` is set, it runs under what `build()` left
-        of that budget (`subprocess_timeout()` is capped by it, and an
-        exhausted budget is an error)."""
-
-        env_manager: EnvironmentManager | AccraError = self._select_env_manager()
-        if isinstance(env_manager, AccraError):
-            return AccraResult(errors=[env_manager], success=False)
-        left = self._build_time_left
-        if left is None:
-            return env_manager.install_project()
-        if left <= 0:
-            return AccraResult(
-                errors=[
-                    AccraBuildError(
-                        message="build time budget exhausted before project install"
-                    )
-                ],
-                success=False,
-            )
-        env_manager.resume_build_budget(left)
-        try:
-            return env_manager.install_project()
-        finally:
-            env_manager.end_build_budget()
-
     def project_names(self) -> set[str]:
         """The env manager's `project_names()`. Read-only."""
 
@@ -146,14 +111,6 @@ class Language(ABC):
         if isinstance(env_manager, AccraError):
             return set()
         return set(env_manager.project_names())
-
-    def has_project_install(self) -> bool:
-        """The env manager's `has_project_install()`. Read-only."""
-
-        env_manager: EnvironmentManager | AccraError = self._select_env_manager()
-        if isinstance(env_manager, AccraError):
-            return False
-        return bool(env_manager.has_project_install())
 
     def missing_tools(self) -> tuple[str, ...]:
         """The toolchain executables that are not on PATH."""
@@ -243,99 +200,26 @@ class Language(ABC):
 
         return None
 
-    def _matching_analyzers(self, metrics: set[Metrics] | None) -> list[Analyzer]:
-        return [
-            analyzer
-            for analyzer in sorted(self.spec.analyzers, key=lambda a: a.spec.name)
-            if metrics is None or analyzer.spec.metrics & metrics
-        ]
-
-    def install_analyzers(
-        self, metrics: set[Metrics] | None = None
-    ) -> dict[str, AccraError | None]:
-        """Installs every analyzer that measures one of `metrics` (all when
-        None) once, after `build()`; keyed by analyzer name, each value None or
-        the error that makes the analyzer unusable here."""
-
-        env_manager: EnvironmentManager | AccraError = self._select_env_manager()
-        results: dict[str, AccraError | None] = {}
-        for analyzer in self._matching_analyzers(metrics):
-            name = analyzer.spec.name
-            if isinstance(env_manager, AccraError):
-                results[name] = env_manager
-                continue
-            if name in self._installed_analyzers:
-                results[name] = None
-                continue
-            if name in self._failed_analyzers:
-                results[name] = self._failed_analyzers[name]
-                continue
-            error = analyzer.install(env_manager)
-            if error is None:
-                self._installed_analyzers.add(name)
-            else:
-                self._failed_analyzers[name] = error
-            results[name] = error
-        return results
-
-    def analyze(
-        self,
-        entry_point: EntryPoint,
-        args: list[str],
-        metrics: set[Metrics] | None = None,
-        *,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-        output_dir: Path | None = None,
-    ) -> dict[str, set[Profile] | AccraError]:
-        """Runs every analyzer that measures one of `metrics` (all when None)
-        on `entry_point` with `args`, installing it first unless
-        `install_analyzers()` did. `env`, `timeout` and `output_dir`
-        are passed to each analyzer (see `Analyzer.analyze`).
-
-        Keyed by analyzer name, in name order; each value is the analyzer's
-        profiles or its error. Meaningful after `build()`."""
-
-        installed: dict[str, AccraError | None] = self.install_analyzers(metrics)
-        env_manager: EnvironmentManager | AccraError = self._select_env_manager()
-        options = {
-            key: value
-            for key, value in (
-                ("env", env),
-                ("timeout", timeout),
-                ("output_dir", output_dir),
-            )
-            if value is not None
-        }
-        results: dict[str, set[Profile] | AccraError] = {}
-        for analyzer in self._matching_analyzers(metrics):
-            name = analyzer.spec.name
-            if installed.get(name) is not None:
-                results[name] = installed[name]
-                continue
-            if isinstance(env_manager, AccraError):
-                results[name] = env_manager
-                continue
-            results[name] = analyzer.analyze(entry_point, args, env_manager, **options)
-        return results
-
     def analyze_project(
-        self, metrics: set[Metrics] | None = None
-    ) -> dict[str, set[Profile] | AccraError]:
-        """Runs every project analyzer that measures one of `metrics` (all when
-        None) on the project's sources; keyed by analyzer name, in name order,
-        each value its profiles or its error. Needs the env manager (after
-        `detect()` or `build()`)."""
+        self,
+        metrics: set[Metrics] | None = None,
+        runs: Sequence[AnalysisRun] = (),
+    ) -> dict[str, AnalysisResults]:
+        """Runs every analyzer that measures one of `metrics` (all when None) on
+        the project, and on `runs` when it measures runs; keyed by analyzer
+        name, in name order, each value its `AnalysisResults`. Needs the env
+        manager (after `detect()` or `build()`); an analyzer's own setup (e.g.
+        a profiler) is its business."""
 
         env_manager: EnvironmentManager | AccraError = self._select_env_manager()
-        results: dict[str, set[Profile] | AccraError] = {}
-        for analyzer in sorted(self.spec.project_analyzers, key=lambda a: a.spec.name):
+        results: dict[str, AnalysisResults] = {}
+        for analyzer in sorted(self.spec.analyzers, key=lambda a: a.spec.name):
             if metrics is not None and not (analyzer.spec.metrics & metrics):
                 continue
             if isinstance(env_manager, AccraError):
-                results[analyzer.spec.name] = env_manager
+                results[analyzer.spec.name] = {None: env_manager}
                 continue
-            results[analyzer.spec.name] = analyzer.analyze_project(env_manager)
+            results[analyzer.spec.name] = analyzer.analyze_project(env_manager, runs)
         return results
 
     def detect(self) -> bool | AccraError:
@@ -377,9 +261,6 @@ class Language(ABC):
         )
 
         result = AccraResult()
-        self._installed_analyzers.clear()
-        self._failed_analyzers.clear()
-        self._build_time_left = None
         env_manager.start_build_budget()
         try:
             for name, step in steps:
@@ -396,7 +277,6 @@ class Language(ABC):
                 if not result.success:
                     break
         finally:
-            self._build_time_left = env_manager.remaining_build_time()
             env_manager.end_build_budget()
 
         return result

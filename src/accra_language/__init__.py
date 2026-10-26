@@ -1,4 +1,6 @@
 from .analyzer import (
+    AnalysisResults,
+    AnalysisRun,
     Analyzer,
     AnalyzerSpec,
     FileModules,
@@ -10,7 +12,6 @@ from .analyzer import (
     ParallelismProfile,
     ParallelismUsage,
     Profile,
-    ProjectAnalyzer,
 )
 from .config import Config
 from .dependency import Dependency
@@ -52,6 +53,8 @@ __all__ = [
     "AccraResult",
     "AccraRunError",
     "AccraUnsupportedError",
+    "AnalysisResults",
+    "AnalysisRun",
     "Analyzer",
     "AnalyzerSpec",
     "ApiSymbol",
@@ -76,7 +79,6 @@ __all__ = [
     "ParallelismProfile",
     "ParallelismUsage",
     "Profile",
-    "ProjectAnalyzer",
     "RunDiagnosis",
     "ScriptProfile",
     "ScriptReading",

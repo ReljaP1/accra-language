@@ -34,7 +34,6 @@ def test_unsupported_defaults_are_unsupported_and_accra_errors():
         language.read_script("", []),
         language.entry_point_for(Path("x")),
         manager.entry_point_for(Path("x")),
-        manager.is_usable(None),
     ]
     for result in results:
         assert isinstance(result, AccraUnsupportedError)
